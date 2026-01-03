@@ -1,208 +1,152 @@
-/************************************************
- * FILE: index.js
- * LOCATION: Root of the project
- * PURPOSE:
- * - Telegram bot logic
- * - MongoDB connection
- * - User stats
- * - Multiple quizzes
- * - Daily quests
- * - Badges
- * - AI answers
- ************************************************/
+const express = require('express');
+const TelegramBot = require('node-telegram-bot-api');
+const mongoose = require('mongoose');
+const OpenAI = require('openai');
 
-import express from "express";
-import { Telegraf } from "telegraf";
-import mongoose from "mongoose";
-import fetch from "node-fetch";
-
-/* ---------- EXPRESS SERVER (FOR RENDER) ---------- */
 const app = express();
-app.get("/", (req, res) => res.send("🤖 Bot is alive"));
-app.listen(process.env.PORT || 3000);
+app.use(express.json());
 
-/* ---------- TELEGRAM BOT ---------- */
-const bot = new Telegraf(process.env.BOT_TOKEN);
+// ===== ENV =====
+const TOKEN = process.env.BOT_TOKEN;
+const MONGO = process.env.MONGODB_URI;
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
+const PORT = process.env.PORT || 3000;
 
-/* ---------- MONGODB CONNECTION ---------- */
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log("✅ MongoDB connected"))
-  .catch(err => console.log("❌ MongoDB error:", err));
+// ===== OPENAI =====
+const openai = new OpenAI({ apiKey: OPENAI_KEY });
 
-/* ---------- USER SCHEMA ---------- */
+// ===== TELEGRAM =====
+const bot = new TelegramBot(TOKEN);
+
+// ===== MONGODB =====
+mongoose.connect(MONGO)
+  .then(() => console.log("MongoDB connected"))
+  .catch(err => console.error(err));
+
+// ===== USER SCHEMA =====
 const userSchema = new mongoose.Schema({
-  telegramId: String,
+  telegramId: Number,
   name: String,
-  username: String,
-  xp: { type: Number, default: 0 },
-  quizzesCompleted: { type: Number, default: 0 },
-  badges: { type: [String], default: ["Beginner"] },
-  dailyQuestDone: { type: Boolean, default: false },
-  lastQuestDate: String
+  score: { type: Number, default: 0 },
+  level: { type: String, default: "🥉 Beginner" },
+  currentAnswer: String
 });
 
-const User = mongoose.model("User", userSchema);
+const User = mongoose.model('User', userSchema);
 
-/* ---------- HELPERS ---------- */
-function today() {
-  return new Date().toISOString().slice(0, 10);
+// ===== QUIZZES =====
+const quizzes = [
+  { q: "What keyword declares a constant in JavaScript?", a: "const" },
+  { q: "Which language is used with Django?", a: "python" },
+  { q: "What does HTML stand for?", a: "hypertext markup language" }
+];
+
+// ===== HELPERS =====
+function getLevel(score) {
+  if (score >= 50) return "🥇 Expert";
+  if (score >= 20) return "🥈 Intermediate";
+  return "🥉 Beginner";
 }
 
-async function getUser(ctx) {
-  let user = await User.findOne({ telegramId: ctx.from.id });
-
+async function getUser(msg) {
+  let user = await User.findOne({ telegramId: msg.chat.id });
   if (!user) {
-    user = new User({
-      telegramId: ctx.from.id,
-      name: ctx.from.first_name,
-      username: ctx.from.username || "N/A"
+    user = await User.create({
+      telegramId: msg.chat.id,
+      name: msg.chat.username || msg.chat.first_name
     });
-    await user.save();
   }
-
-  // Reset daily quest each new day
-  if (user.lastQuestDate !== today()) {
-    user.dailyQuestDone = false;
-    user.lastQuestDate = today();
-    await user.save();
-  }
-
   return user;
 }
 
-/* ---------- QUIZ DATA (MULTIPLE QUIZZES) ---------- */
-const quizzes = [
-  {
-    question: "What is JavaScript?",
-    options: ["A database", "A programming language", "An OS"],
-    answer: "B"
-  },
-  {
-    question: "Which keyword declares a variable in JavaScript?",
-    options: ["var", "print", "loop"],
-    answer: "A"
-  },
-  {
-    question: "Which data type is true or false?",
-    options: ["String", "Boolean", "Number"],
-    answer: "B"
-  },
-  {
-    question: "Which symbol starts a comment in JavaScript?",
-    options: ["//", "<!--", "#"],
-    answer: "A"
+// ===== WEBHOOK =====
+app.post('/webhook', (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
+
+// ===== BOT =====
+bot.on('message', async (msg) => {
+  if (!msg.text) return;
+  const text = msg.text.toLowerCase();
+  const chatId = msg.chat.id;
+  const user = await getUser(msg);
+
+  // START
+  if (text === '/start') {
+    return bot.sendMessage(chatId,
+      `👋 Welcome ${user.name}
+
+Commands:
+/quiz
+/leaderboard
+/profile
+/learn python | js | html
+/explain <topic>`
+    );
   }
-];
 
-/* ---------- BOT COMMANDS ---------- */
-
-// /start
-bot.start(async (ctx) => {
-  await getUser(ctx);
-  ctx.reply(
-    "👋 Welcome to *Coding Quest Bot!*\n\n" +
-    "🧠 /quiz – Take a quiz\n" +
-    "📅 /daily – Daily quest\n" +
-    "📊 /stats – Your stats\n" +
-    "❓ /ask <question> – Ask coding questions",
-    { parse_mode: "Markdown" }
-  );
-});
-
-// /stats
-bot.command("stats", async (ctx) => {
-  const u = await getUser(ctx);
-  ctx.reply(
-    `📊 *Your Stats*\n\n` +
-    `👤 Name: ${u.name}\n` +
-    `🔖 Username: @${u.username}\n` +
-    `⭐ XP: ${u.xp}\n` +
-    `🧠 Quizzes: ${u.quizzesCompleted}\n` +
-    `📅 Daily Quest: ${u.dailyQuestDone ? "Completed ✅" : "Pending ❌"}\n` +
-    `🏅 Badges: ${u.badges.join(", ")}`,
-    { parse_mode: "Markdown" }
-  );
-});
-
-// /daily
-bot.command("daily", async (ctx) => {
-  const u = await getUser(ctx);
-  if (u.dailyQuestDone) {
-    return ctx.reply("✅ You already completed today’s quest!");
+  // QUIZ
+  if (text === '/quiz') {
+    const quiz = quizzes[Math.floor(Math.random() * quizzes.length)];
+    user.currentAnswer = quiz.a;
+    await user.save();
+    return bot.sendMessage(chatId, `🧠 Quiz:\n${quiz.q}`);
   }
-  ctx.reply("📅 Daily Quest: Complete **1 quiz today** to earn XP!",
-    { parse_mode: "Markdown" }
-  );
-});
 
-// /quiz
-bot.command("quiz", async (ctx) => {
-  const user = await getUser(ctx);
-  const quiz = quizzes[Math.floor(Math.random() * quizzes.length)];
-
-  ctx.reply(
-    `🧠 *Quiz Time!*\n\n${quiz.question}\n\n` +
-    `A) ${quiz.options[0]}\n` +
-    `B) ${quiz.options[1]}\n` +
-    `C) ${quiz.options[2]}\n\n` +
-    `Reply with A, B, or C`,
-    { parse_mode: "Markdown" }
-  );
-
-  bot.once("text", async (ctx2) => {
-    if (ctx2.message.text.toUpperCase() === quiz.answer) {
-      user.xp += 10;
-      user.quizzesCompleted += 1;
-
-      if (!user.dailyQuestDone) {
-        user.dailyQuestDone = true;
-        user.xp += 5;
-        if (!user.badges.includes("Daily Hero")) {
-          user.badges.push("Daily Hero");
-        }
-      }
-
-      if (user.quizzesCompleted >= 3 && !user.badges.includes("Quiz Master")) {
-        user.badges.push("Quiz Master");
-      }
-
+  // ANSWER
+  if (user.currentAnswer) {
+    if (text === user.currentAnswer) {
+      user.score += 10;
+      user.level = getLevel(user.score);
+      user.currentAnswer = null;
       await user.save();
-      ctx2.reply("✅ Correct! +XP 🎉");
+      return bot.sendMessage(chatId, `✅ Correct!\nScore: ${user.score}\nLevel: ${user.level}`);
     } else {
-      ctx2.reply(`❌ Incorrect. Correct answer is ${quiz.answer}.`);
+      const ai = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "Explain programming concepts simply." },
+          { role: "user", content: `Explain why "${user.currentAnswer}" is the correct answer.` }
+        ]
+      });
+      return bot.sendMessage(chatId, `❌ Wrong\n🤖 AI explains:\n${ai.choices[0].message.content}`);
     }
-  });
-});
+  }
 
-// /ask
-bot.command("ask", async (ctx) => {
-  const question = ctx.message.text.replace("/ask", "").trim();
-  if (!question) return ctx.reply("❓ Ask a coding question.");
+  // LEADERBOARD
+  if (text === '/leaderboard') {
+    const users = await User.find().sort({ score: -1 }).limit(5);
+    const board = users.map((u, i) => `${i + 1}. ${u.name} – ${u.score}`).join('\n');
+    return bot.sendMessage(chatId, `🏆 Leaderboard\n${board}`);
+  }
 
-  ctx.reply("🤔 Thinking...");
+  // PROFILE
+  if (text === '/profile') {
+    return bot.sendMessage(chatId,
+      `👤 Profile
+Name: ${user.name}
+Score: ${user.score}
+Level: ${user.level}`);
+  }
 
-  try {
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "mistralai/mistral-7b-instruct",
-        messages: [{ role: "user", content: question }]
-      })
+  // AI EXPLAIN
+  if (text.startsWith('/explain')) {
+    const topic = text.replace('/explain', '').trim();
+    const ai = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: "Teach programming simply." },
+        { role: "user", content: `Explain ${topic} for a beginner.` }
+      ]
     });
-
-    const data = await res.json();
-    const answer = data?.choices?.[0]?.message?.content;
-    if (!answer) return ctx.reply("⚠️ AI unavailable right now.");
-    ctx.reply(answer);
-  } catch {
-    ctx.reply("❌ AI error. Try later.");
+    return bot.sendMessage(chatId, ai.choices[0].message.content);
   }
 });
 
-/* ---------- START BOT ---------- */
-bot.launch();
-console.log("✅ Bot running");
+// ===== HEALTH =====
+app.get('/', (req, res) => {
+  res.send('Bot is alive');
+});
+
+app.listen(PORT, () => console.log("Server running"));
