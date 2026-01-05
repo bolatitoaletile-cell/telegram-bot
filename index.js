@@ -19,7 +19,7 @@ const openai = new OpenAI({ apiKey: OPENAI_KEY });
 const bot = new TelegramBot(TOKEN);
 
 // ===== MONGODB =====
-mongoose.connect(MONGO)
+//mongoose.connect(MONGO)
   .then(() => console.log("MongoDB connected"))
   .catch(err => console.error(err));
 
